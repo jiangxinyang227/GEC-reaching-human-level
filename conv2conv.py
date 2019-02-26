@@ -26,49 +26,52 @@ class Conv2Conv(object):
         :return:
         """
         with tf.name_scope("padding_aware_softmax"):
-            # Lengths to which batches are padded to
-            TQ = tf.shape(logits)[1]
-            TK = tf.shape(logits)[2]
+            # 获得序列最大长度值
+            de_seq_len = tf.shape(logits)[1]
+            en_seq_len = tf.shape(logits)[2]
 
-            # Derive masks
-            query_mask = tf.sequence_mask(lengths=query_len, maxlen=TQ, dtype=tf.int32)  # [B, TQ]
-            key_mask = tf.sequence_mask(lengths=key_len, maxlen=TK, dtype=tf.int32)  # [B, TK]
+            # masks
+            # [batch_size, de_seq_len]
+            query_mask = tf.sequence_mask(lengths=query_len, maxlen=de_seq_len, dtype=tf.int32)
+            # [batch_size, en_seq_len]
+            key_mask = tf.sequence_mask(lengths=key_len, maxlen=en_seq_len, dtype=tf.int32)
 
-            # Introduce new dimensions (we want to have a batch-wise outer product)
-            query_mask = tf.expand_dims(query_mask, axis=2)  # [B, TQ, 1]
-            key_mask = tf.expand_dims(key_mask, axis=1)  # [B, 1, TK]
+            # 扩展一维
+            query_mask = tf.expand_dims(query_mask, axis=2)  # [batch_size, de_seq_len, 1]
+            key_mask = tf.expand_dims(key_mask, axis=1)  # [batch_size, 1, en_seq_len]
 
-            # Combine masks
-            joint_mask = tf.cast(tf.matmul(query_mask, key_mask), tf.float32, name="joint_mask")  # [B, TQ, TK]
+            # 将query和key的mask相结合 [batch_size, de_seq_len, en_seq_len]
+            joint_mask = tf.cast(tf.matmul(query_mask, key_mask), tf.float32, name="joint_mask")
 
             # Padding should not influence maximum (replace with minimum)
-            logits_min = tf.reduce_min(logits, axis=2, keepdims=True, name="logits_min")  # [B, TQ, 1]
-            logits_min = tf.tile(logits_min, multiples=[1, 1, TK])  # [B, TQ, TK]
+            logits_min = tf.reduce_min(logits, axis=2, keepdims=True, name="logits_min")  # [batch_size, de_seq_len, 1]
+            logits_min = tf.tile(logits_min, multiples=[1, 1, en_seq_len])  # [batch_size, de_seq_len, en_seq_len]
             logits = tf.where(condition=joint_mask > .5,
                               x=logits,
                               y=logits_min)
 
-            # Determine maximum
-            logits_max = tf.reduce_max(logits, axis=2, keepdims=True, name="logits_max")  # [B, TQ, 1]
-            logits_shifted = tf.subtract(logits, logits_max, name="logits_shifted")  # [B, TQ, TK]
+            # 获得最大值
+            logits_max = tf.reduce_max(logits, axis=2, keepdims=True, name="logits_max")  # [batch_size, de_seq_len, 1]
+            # 所有的元素都减去最大值  [batch_size, de_seq_len, en_seq_len]
+            logits_shifted = tf.subtract(logits, logits_max, name="logits_shifted")
 
-            # Derive unscaled weights
+            # 导出未缩放的值
             weights_unscaled = tf.exp(logits_shifted, name="weights_unscaled")
 
-            # Apply mask
-            weights_unscaled = tf.multiply(joint_mask, weights_unscaled, name="weights_unscaled_masked")  # [B, TQ, TK]
+            # mask 部分权重  [batch_size, de_seq_len, en_seq_len]
+            weights_unscaled = tf.multiply(joint_mask, weights_unscaled, name="weights_unscaled_masked")
 
-            # Derive total mass
+            # 得到每个时间步的总值 [batch_size, de_seq_len, 1]
             weights_total_mass = tf.reduce_sum(weights_unscaled, axis=2,
-                                               keepdims=True, name="weights_total_mass")  # [B, TQ, 1]
+                                               keepdims=True, name="weights_total_mass")
 
-            # Avoid division by zero
+            # 避免除数为0
             weights_total_mass = tf.where(condition=tf.equal(query_mask, 1),
                                           x=weights_total_mass,
                                           y=tf.ones_like(weights_total_mass))
 
-            # Normalize weights
-            weights = tf.divide(weights_unscaled, weights_total_mass, name="normalize_attention_weights")  # [B, TQ, TK]
+            # 对权重进行正规化  [batch_size, de_seq_len, en_seq_len]
+            weights = tf.divide(weights_unscaled, weights_total_mass, name="normalize_attention_weights")
 
             return weights
 
