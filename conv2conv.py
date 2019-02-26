@@ -298,3 +298,42 @@ class Conv2Conv(object):
             output = tf.matmul(inputs_final, w_output) + b_output
 
         return output
+
+    def add_position_embedding(self, inputs):
+        """
+        对映射后的词向量加上位置向量，位置向量和transformer中的位置向量一样
+        :param inputs: [batch_size, seq_len, embedding_size]
+        :return: [batch_size, seq_len, embedding_size]
+        """
+        seq_len = tf.shape(inputs)[1]
+
+        # 生成位置的索引，并扩张到batch中所有的样本上 [batch_size, seq_len]
+        position_index = tf.tile(tf.expand_dims(tf.range(seq_len), 0), [self.batch_size, 1])
+
+        # 根据正弦和余弦函数来获得每个位置上的embedding的第一部分 [seq_len, embedding_size]
+        position_embedding = np.array([[pos / np.power(10000, (i - i % 2) / self.embedding_size)
+                                        for i in range(self.embedding_size)]
+                                      for pos in range(seq_len)])
+
+        # 然后根据奇偶性分别用sin和cos函数来包装
+        position_embedding[:, 0::2] = np.sin(position_embedding[:, 0::2])
+        position_embedding[:, 1::2] = np.cos(position_embedding[:, 1::2])
+
+        # 将position_embedding转换成tensor的格式 [seq_len, embedding_size]
+        position_embedding_ = tf.cast(position_embedding, dtype=tf.float32)
+
+        # 得到三维的矩阵[batch_size, seq_len, embedding_size]
+        position_embedded = tf.nn.embedding_lookup(position_embedding_, position_index)
+
+        # 对位置向量进行缩放, 标量
+        gamma = tf.get_variable(name="gamma",
+                                shape=[],
+                                initializer=tf.initializers.ones,
+                                trainable=True,
+                                dtype=tf.float32)
+
+        embedding = tf.add(inputs, gamma * position_embedded, name="composed_embedding")
+
+        return embedding
+
+
