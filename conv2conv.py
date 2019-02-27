@@ -6,16 +6,32 @@ class Conv2Conv(object):
     """
     定义卷积到卷积的seq2seq网络结构
     """
-    def __init__(self, batch_size, embedding_size, hidden_size, vocab_size, num_layers, dropout_rate,
-                 kernel_size, num_filters):
-        self.batch_size = batch_size
+    def __init__(self, embedding_size, hidden_size, vocab_size, num_layers, kernel_size, num_filters, is_training):
+
         self.embedding_size = embedding_size
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
         self.num_layers = num_layers
-        self.dropout_rate = dropout_rate
         self.kernel_size = kernel_size
         self.num_filters = num_filters
+        self.is_training = is_training
+
+        # 定义模型的placeholder, 也就是喂给feed_dict的参数
+        self.encoder_inputs = tf.placeholder(tf.int32, [None, None], name='encoder_inputs')
+        self.encoder_inputs_length = tf.placeholder(tf.int32, [None], name='encoder_inputs_length')
+
+        self.batch_size = tf.placeholder(tf.int32, None, name='batch_size')
+        self.keep_prob = tf.placeholder(tf.float32, name='keep_prob')
+
+        self.decoder_targets = tf.placeholder(tf.int32, [None, None], name='decoder_targets')
+        self.decoder_targets_length = tf.placeholder(tf.int32, [None], name='decoder_targets_length')
+        # 根据目标序列长度，选出其中最大值，然后使用该值构建序列长度的mask标志。用一个sequence_mask的例子来说明起作用
+        self.max_target_sequence_length = tf.reduce_max(self.decoder_targets_length, name='max_target_len')
+        self.decoder_mask = tf.sequence_mask(self.decoder_targets_length, self.max_target_sequence_length,
+                                             dtype=tf.float32, name='decoder_masks')
+
+        # 实例化对象时构建网络结构
+        self.build_network()
 
     def padding_and_softmax(self, logits, query_len, key_len):
         """
@@ -108,13 +124,11 @@ class Conv2Conv(object):
         a, b = tf.split(x, num_or_size_splits=2, axis=2)
         return tf.multiply(tf.nn.sigmoid(b), a)
 
-    def encoder_layer(self, inputs, input_len, kernel_size, dropout_rate, is_training):
+    def encoder_layer(self, inputs, input_len, is_training):
         """
         单层encoder层的实现
         :param inputs: encoder的输入 [batch_size, seq_len, hidden_size]
         :param input_len: encoder输入的实际长度
-        :param kernel_size: 卷积核大小
-        :param dropout_rate:
         :param is_training:
         :return:
         """
@@ -122,13 +136,16 @@ class Conv2Conv(object):
         seq_len = tf.shape(inputs)[1]
 
         # 计算序列在卷积时要补的长度
-        num_pad = kernel_size - 1
+        num_pad = self.kernel_size - 1
 
         # 在序列的左右各补长一半
         x_pad = tf.pad(inputs, paddings=[[0, 0], [num_pad / 2, num_pad / 2], [0, 0]])
 
         # 一维卷积操作，针对3维的输入的卷积 [batch_size, seq_len, 2 * hidden_size]
-        x_conv = tf.nn.conv1d(x_pad, [kernel_size, self.hidden_size, 2 * self.hidden_size], stride=1, padding="VALID")
+        x_conv = tf.nn.conv1d(x_pad,
+                              [self.kernel_size, self.hidden_size, 2 * self.hidden_size],
+                              stride=1,
+                              padding="VALID")
         # 一维卷积操作，针对3维的输入的卷积，[B, T, 2*E]
         # x_conv = tf.layers.Conv1D(filters=2 * self.hidden_size,
         #                           kernel_size=kernel_size,
@@ -148,7 +165,7 @@ class Conv2Conv(object):
         x_mask = tf.multiply(mask, x_glu)
 
         # drouput 正则化 [batch_size, seq_len, hidden_size]
-        x_drop = tf.nn.dropout(x_mask, keep_prob=dropout_rate, noise_shape=[self.batch_size, 1, self.hidden_size])
+        x_drop = tf.nn.dropout(x_mask, keep_prob=self.keep_prob, noise_shape=[self.batch_size, 1, self.hidden_size])
 
         # 残差连接 [batch_size, seq_len, hidden_size]
         x_drop = x_drop + inputs
@@ -173,13 +190,11 @@ class Conv2Conv(object):
 
             inputs_start = tf.matmul(inputs, w_start) + b_start  # [batch_size, seq_len, hidden_size]
 
-        with tf.name_scope("encoder"):
-            # 维度不变
-            for layer_id in range(self.num_layers):
+        # 维度不变
+        for layer_id in range(self.num_layers):
+            with tf.name_scope("encoder_layer_" + str(layer_id)):
                 inputs_start = self.encoder_layer(inputs=inputs_start,
                                                   input_len=input_len,
-                                                  kernel_size=self.kernel_size,
-                                                  dropout_rate=self.dropout_rate,
                                                   is_training=is_training)
 
         with tf.name_scope("final_linear_map"):
@@ -191,17 +206,27 @@ class Conv2Conv(object):
         return inputs_final
 
     def decoder_layer(self, raw_inputs, new_inputs, input_len, encoder_input, encoder_output,
-                      encoder_length, kernel_size, dropout_rate, is_training):
-
+                      encoder_length, is_training):
+        """
+        单层decoder层的实现
+        :param raw_inputs: 原始的decoder输入
+        :param new_inputs: 上一层decoder的输出
+        :param input_len: decoder的输入的真实长度
+        :param encoder_input: encoder的原始输入
+        :param encoder_output: encoder的输出
+        :param encoder_length: encoder的输入的真实长度
+        :param is_training:
+        :return:
+        """
         seq_len = tf.shape(new_inputs)[1]
 
-        num_pad = kernel_size - 1
+        num_pad = self.kernel_size - 1
 
         # 在序列的左边进行补长，
         x_pad = tf.pad(new_inputs, paddings=[[0, 0], [num_pad, 0], [0, 0]])
 
         # 一维卷积操作，针对3维的输入的卷积，[batch_size, seq_len, 2 * hidden_size]
-        x_conv = tf.nn.conv1d(x_pad, [kernel_size, self.hidden_size, 2 * self.hidden_size],
+        x_conv = tf.nn.conv1d(x_pad, [self.kernel_size, self.hidden_size, 2 * self.hidden_size],
                               stride=1, padding="VALID")
 
         # x_conv = tf.layers.Conv1D(filters=2 * E,
@@ -250,7 +275,7 @@ class Conv2Conv(object):
         x_mask = tf.multiply(mask, x_final)
 
         # drouput 正则化
-        x_drop = tf.nn.dropout(x_mask, keep_prob=dropout_rate,
+        x_drop = tf.nn.dropout(x_mask, keep_prob=self.keep_prob,
                                noise_shape=[self.batch_size, 1, self.hidden_size])
 
         # 残差连接
@@ -260,8 +285,17 @@ class Conv2Conv(object):
 
         return x_bn
 
-    def decoder(self, inputs, input_len, encoder_input, encoder_output, encoder_length,
-                vocab_size, is_training):
+    def decoder(self, inputs, input_len, encoder_input, encoder_output, encoder_length, is_training):
+        """
+        decoder部分
+        :param inputs: decoder的输入
+        :param input_len: decoder的输入的真实长度
+        :param encoder_input: encoder的输入
+        :param encoder_output: encoder的输出
+        :param encoder_length: encoder的输入的真实长度
+        :param is_training:
+        :return: 卷积的seq2seq在解码时是独立的对每个时间步进行多分类 [batch_size, de_seq_len, vocab_size]
+        """
 
         with tf.name_scope("start_linear_map"):
             w_start = tf.get_variable("w_start", shape=[self.embedding_size, self.hidden_size],
@@ -270,16 +304,14 @@ class Conv2Conv(object):
 
             inputs_start = tf.matmul(inputs, w_start) + b_start  # [batch_size, seq_len, hidden_size]
 
-        with tf.name_scope("decoder"):
-            for layer_id in range(self.num_layers):
+        for layer_id in range(self.num_layers):
+            with tf.name_scope("decoder_layer_" + str(layer_id)):
                 inputs_start = self.decoder_layer(raw_inputs=inputs,
                                                   new_inputs=inputs_start,
                                                   input_len=input_len,
                                                   encoder_input=encoder_input,
                                                   encoder_output=encoder_output,
                                                   encoder_length=encoder_length,
-                                                  kernel_size=self.kernel_size,
-                                                  dropout_rate=self.dropout_rate,
                                                   is_training=is_training)
 
         with tf.name_scope("final_linear_map"):
@@ -336,4 +368,67 @@ class Conv2Conv(object):
 
         return embedding
 
+    def train_method(self, decoder_output):
+        """
+        定义训练方法和损失
+        :param decoder_output:
+        :return:
+        """
+        self.predictions = tf.argmax(decoder_output, axis=-1, name="predictions")
 
+        # [batch_size, de_seq_len]
+        loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=decoder_output, labels=self.decoder_targets)
+        losses = tf.boolean_mask(loss, self.decoder_mask)
+        self.loss = tf.reduce_mean(losses, name="loss")
+
+        # Decay learning rate
+        learning_rate = tf.train.cosine_decay_restarts(learning_rate=0.01,
+                                                       global_step=tf.train.get_global_step(),
+                                                       first_decay_steps=100,
+                                                       t_mul=2.0,
+                                                       m_mul=0.9,
+                                                       alpha=0.01)
+
+        # Optimizer
+        optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate,
+                                               momentum=0.9,
+                                               use_nesterov=True)
+        self.train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step(), name="train_op")
+
+    def build_network(self):
+        with tf.name_scope("embedding"):
+            w = tf.get_variable('w', [self.vocab_size, self.embedding_size])
+            encoder_embedded = tf.nn.embedding_lookup(w, self.encoder_inputs, name="encoder_embedded")
+
+            decoder_embedded = tf.nn.embedding_lookup(w, self.decoder_targets, name="decoder_embedded")
+
+            # 添加位置向量
+            encoder_embedded = self.add_position_embedding(encoder_embedded)
+            decoder_embedded = self.add_position_embedding(decoder_embedded)
+
+        with tf.name_scope("encoder"):
+            encoder_output = self.encoder(encoder_embedded, self.encoder_inputs_length, self.is_training)
+
+        with tf.name_scope("decoder"):
+            decoder_output = self.decoder(decoder_embedded, self.decoder_targets_length, encoder_embedded,
+                                          encoder_output, self.encoder_inputs_length, self.is_training)
+
+        self.train_method(decoder_output)
+
+    def train(self, sess):
+        feed_dict = {}
+        _, loss, predictions = sess.run([self.train_op, self.loss, self.predictions], feed_dict=feed_dict)
+
+        return loss, predictions
+
+    def eval(self, sess):
+        feed_dict = {}
+        loss, predictions = sess.run([self.loss, self.predictions], feed_dict=feed_dict)
+
+        return loss, predictions
+
+    def infer(self, sess):
+        feed_dict = {}
+        predictions = sess.run(self.predictions, feed_dict=feed_dict)
+
+        return predictions
