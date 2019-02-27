@@ -57,21 +57,21 @@ with tf.device("/device:GPU:0"):
 
             for batch in dataSet.next_batch(dataSet.train_data):
                 loss, predictions = model.train(sess, batch, FLAGS.keep_prob)
-                perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
+                f = f_beta(predictions.tolist(), batch["targets"], batch["target_length"])
                 current_step += 1
-                print("train: step: {}, loss: {}, perplexity: {}".format(current_step, loss, perplexity))
+                print("train: step: {}, loss: {}, f_0.5: {}".format(current_step, loss, f))
                 if current_step % FLAGS.steps_per_checkpoint == 0:
 
                     eval_losses = []
-                    eval_perplexities = []
+                    eval_fs = []
                     for eval_batch in dataSet.next_batch(dataSet.eval_data):
-                        eval_loss, eval_summary = model.eval(sess, eval_batch, 1.0)
-                        eval_perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
+                        eval_loss, eval_predictions = model.eval(sess, eval_batch, 1.0)
+                        eval_f = f_beta(eval_predictions.tolist(), eval_batch["targets"], eval_batch["target_length"])
 
                         eval_losses.append(eval_loss)
-                        eval_perplexities.append(eval_perplexity)
+                        eval_fs.append(eval_f)
                     print("eval: step: {}, loss: {}, perplexity: {}".format(current_step,
                                                                             sum(eval_losses) / len(eval_losses),
-                                                                            sum(eval_perplexities) / len(eval_perplexities)))
+                                                                            sum(eval_fs) / len(eval_fs)))
                     checkpoint_path = os.path.join(FLAGS.model_dir, FLAGS.model_name)
                     saver.save(sess, checkpoint_path, global_step=current_step)
