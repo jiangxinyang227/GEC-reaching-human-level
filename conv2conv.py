@@ -139,13 +139,12 @@ class Conv2Conv(object):
         num_pad = self.kernel_size - 1
 
         # 在序列的左右各补长一半
-        x_pad = tf.pad(inputs, paddings=[[0, 0], [num_pad / 2, num_pad / 2], [0, 0]])
+        x_pad = tf.pad(inputs, paddings=[[0, 0], [int(num_pad / 2), int(num_pad / 2)], [0, 0]])
 
+        filters = tf.constant(1, tf.float32, (self.kernel_size, self.hidden_size, 2 * self.hidden_size))
         # 一维卷积操作，针对3维的输入的卷积 [batch_size, seq_len, 2 * hidden_size]
-        x_conv = tf.nn.conv1d(x_pad,
-                              [self.kernel_size, self.hidden_size, 2 * self.hidden_size],
-                              stride=1,
-                              padding="VALID")
+        x_conv = tf.nn.conv1d(x_pad, filters, stride=1, padding="VALID")
+
         # 一维卷积操作，针对3维的输入的卷积，[B, T, 2*E]
         # x_conv = tf.layers.Conv1D(filters=2 * self.hidden_size,
         #                           kernel_size=kernel_size,
@@ -183,12 +182,15 @@ class Conv2Conv(object):
         :param is_training:
         :return:
         """
-        with tf.name_scope("start_linear_map"):
+        with tf.name_scope("encoder_start_linear_map"):
             w_start = tf.get_variable("w_start", shape=[self.embedding_size, self.hidden_size],
                                       initializer=tf.contrib.layers.xavier_initializer())
             b_start = tf.Variable(tf.constant(0.1, shape=[self.hidden_size]), name="b_start")
 
-            inputs_start = tf.matmul(inputs, w_start) + b_start  # [batch_size, seq_len, hidden_size]
+            inputs_start = tf.reshape(tf.nn.xw_plus_b(tf.reshape(inputs,
+                                                                 [-1, self.embedding_size]),
+                                                      w_start, b_start),
+                                      [self.batch_size, -1, self.hidden_size])  # [batch_size, seq_len, hidden_size]
 
         # 维度不变
         for layer_id in range(self.num_layers):
@@ -197,11 +199,16 @@ class Conv2Conv(object):
                                                   input_len=input_len,
                                                   is_training=is_training)
 
-        with tf.name_scope("final_linear_map"):
+        with tf.name_scope("encoder_final_linear_map"):
             w_final = tf.get_variable("w_final", shape=[self.hidden_size, self.embedding_size],
                                       initializer=tf.contrib.layers.xavier_initializer())
             b_final = tf.Variable(tf.constant(0.1, shape=[self.embedding_size]), name="b_final")
-            inputs_final = tf.matmul(inputs_start, w_final) + b_final  # [batch_size, seq_len, embedding_size]
+
+            # [batch_size, seq_len, embedding_size]
+            inputs_final = tf.reshape(tf.nn.xw_plus_b(tf.reshape(inputs_start,
+                                                                 [-1, self.hidden_size]),
+                                                      w_final, b_final),
+                                      [self.batch_size, -1, self.embedding_size])
 
         return inputs_final
 
@@ -225,9 +232,9 @@ class Conv2Conv(object):
         # 在序列的左边进行补长，
         x_pad = tf.pad(new_inputs, paddings=[[0, 0], [num_pad, 0], [0, 0]])
 
+        filters = tf.constant(1, tf.float32, (self.kernel_size, self.hidden_size, 2 * self.hidden_size))
         # 一维卷积操作，针对3维的输入的卷积，[batch_size, seq_len, 2 * hidden_size]
-        x_conv = tf.nn.conv1d(x_pad, [self.kernel_size, self.hidden_size, 2 * self.hidden_size],
-                              stride=1, padding="VALID")
+        x_conv = tf.nn.conv1d(x_pad, filters, stride=1, padding="VALID")
 
         # x_conv = tf.layers.Conv1D(filters=2 * E,
         #                           kernel_size=kernel_size,
@@ -239,13 +246,15 @@ class Conv2Conv(object):
         # glu 门控函数 [batch_size, seq_len, hidden_size]
         x_glu = self.glu(x_conv)
 
-        with tf.name_scope("middle_linear_map"):
+        with tf.variable_scope("decoder_middle_linear_map"):
             w_middle = tf.get_variable("w_middle", shape=[self.hidden_size, self.embedding_size],
                                        initializer=tf.contrib.layers.xavier_initializer())
             b_middle = tf.Variable(tf.constant(0.1, shape=[self.embedding_size]), name="b_middle")
 
             # [batch_size, seq_len, embedding_size]
-            x_middle = tf.add(tf.matmul(x_glu, w_middle) + b_middle, raw_inputs)
+            x_middle = tf.add(tf.reshape(tf.nn.xw_plus_b(tf.reshape(x_glu, [-1, self.hidden_size]),
+                                                         w_middle, b_middle),
+                                         [self.batch_size, -1, self.embedding_size]), raw_inputs)
 
         # attention [batch_size, seq_len, embedding_size]
         x_atten = self.attention(query=x_middle,
@@ -255,14 +264,17 @@ class Conv2Conv(object):
                                  query_len=input_len,
                                  key_len=encoder_length)
 
-        with tf.name_scope("middle_linear_map_1"):
+        with tf.variable_scope("decoder_middle_linear_map_1_"):
             w_middle_1 = tf.get_variable("w_middle_1",
                                          shape=[self.embedding_size, self.hidden_size],
                                          initializer=tf.contrib.layers.xavier_initializer())
             b_middle_1 = tf.Variable(tf.constant(0.1, shape=[self.hidden_size]), name="b_middle_1")
 
             # [batch_size, seq_len, hidden_size]
-            x_middle_1 = tf.matmul(x_atten, w_middle_1) + b_middle_1
+            x_middle_1 = tf.reshape(tf.nn.xw_plus_b(tf.reshape(x_atten,
+                                                               [-1, self.embedding_size]),
+                                                    w_middle_1, b_middle_1),
+                                    [self.batch_size, -1, self.hidden_size])
 
             # [batch_size, seq_len, hidden_size]
             x_final = x_glu + x_middle_1 + new_inputs
@@ -297,15 +309,18 @@ class Conv2Conv(object):
         :return: 卷积的seq2seq在解码时是独立的对每个时间步进行多分类 [batch_size, de_seq_len, vocab_size]
         """
 
-        with tf.name_scope("start_linear_map"):
+        with tf.variable_scope("decoder_start_linear_map"):
             w_start = tf.get_variable("w_start", shape=[self.embedding_size, self.hidden_size],
                                       initializer=tf.contrib.layers.xavier_initializer())
             b_start = tf.Variable(tf.constant(0.1, shape=[self.hidden_size]), name="b_start")
 
-            inputs_start = tf.matmul(inputs, w_start) + b_start  # [batch_size, seq_len, hidden_size]
+            inputs_start = tf.reshape(tf.nn.xw_plus_b(tf.reshape(inputs,
+                                                                 [-1, self.embedding_size]),
+                                                      w_start, b_start),
+                                      [self.batch_size, -1, self.hidden_size])  # [batch_size, seq_len, hidden_size]
 
         for layer_id in range(self.num_layers):
-            with tf.name_scope("decoder_layer_" + str(layer_id)):
+            with tf.variable_scope("decoder_layer_" + str(layer_id)):
                 inputs_start = self.decoder_layer(raw_inputs=inputs,
                                                   new_inputs=inputs_start,
                                                   input_len=input_len,
@@ -314,57 +329,63 @@ class Conv2Conv(object):
                                                   encoder_length=encoder_length,
                                                   is_training=is_training)
 
-        with tf.name_scope("final_linear_map"):
+        with tf.variable_scope("decoder_final_linear_map"):
             w_final = tf.get_variable("w_final", shape=[self.hidden_size, self.embedding_size],
                                       initializer=tf.contrib.layers.xavier_initializer())
             b_final = tf.Variable(tf.constant(0.1, shape=[self.embedding_size]), name="b_final")
 
             # [batch_size, seq_len, embedding_size]
-            inputs_final = tf.matmul(inputs_start, w_final) + b_final
+            inputs_final = tf.reshape(tf.nn.xw_plus_b(tf.reshape(inputs_start,
+                                                                 [-1, self.hidden_size]),
+                                                      w_final, b_final),
+                                      [self.batch_size, -1, self.embedding_size])
 
         with tf.name_scope("output"):
             w_output = tf.get_variable("w_output", shape=[self.embedding_size, self.vocab_size],
                                        initializer=tf.contrib.layers.xavier_initializer())
             b_output = tf.Variable(tf.constant(0.1, shape=[self.vocab_size]), name="b_output")
 
-            output = tf.matmul(inputs_final, w_output) + b_output
+            output = tf.reshape(tf.nn.xw_plus_b(tf.reshape(inputs_final,
+                                                           [-1, self.embedding_size]),
+                                                w_output, b_output),
+                                [self.batch_size, -1, self.vocab_size])
 
         return output
 
-    def add_position_embedding(self, inputs):
+    def add_position_embedding(self, inputs, mode):
         """
         对映射后的词向量加上位置向量，位置向量和transformer中的位置向量一样
         :param inputs: [batch_size, seq_len, embedding_size]
         :return: [batch_size, seq_len, embedding_size]
         """
+
         seq_len = tf.shape(inputs)[1]
+        d_model = self.embedding_size
 
-        # 生成位置的索引，并扩张到batch中所有的样本上 [batch_size, seq_len]
-        position_index = tf.tile(tf.expand_dims(tf.range(seq_len), 0), [self.batch_size, 1])
+        # [embedding_size, seq_len]
+        pos = tf.cast(tf.tile(tf.expand_dims(tf.range(seq_len), axis=0), multiples=[d_model, 1]), tf.float32)
+        # [embedding_size, seq_len]
+        i = tf.cast(tf.tile(tf.expand_dims(tf.range(d_model), axis=1), multiples=[1, seq_len]), tf.float32)
 
-        # 根据正弦和余弦函数来获得每个位置上的embedding的第一部分 [seq_len, embedding_size]
-        position_embedding = np.array([[pos / np.power(10000, (i - i % 2) / self.embedding_size)
-                                        for i in range(self.embedding_size)]
-                                      for pos in range(seq_len)])
+        # 定义正弦和余弦函数
+        sine = tf.sin(tf.divide(pos, tf.pow(float(10 ** 4), tf.divide(i, d_model))))  # [E, T]
+        cosine = tf.cos(tf.divide(pos, tf.pow(float(10 ** 4), tf.divide(i, d_model))))  # [E, T]
+        cosine = tf.manip.roll(cosine, shift=1, axis=0)
 
-        # 然后根据奇偶性分别用sin和cos函数来包装
-        position_embedding[:, 0::2] = np.sin(position_embedding[:, 0::2])
-        position_embedding[:, 1::2] = np.cos(position_embedding[:, 1::2])
-
-        # 将position_embedding转换成tensor的格式 [seq_len, embedding_size]
-        position_embedding_ = tf.cast(position_embedding, dtype=tf.float32)
-
-        # 得到三维的矩阵[batch_size, seq_len, embedding_size]
-        position_embedded = tf.nn.embedding_lookup(position_embedding_, position_index)
+        # 生成正弦和余弦的分段函数
+        even_mask = tf.equal(tf.mod(tf.range(d_model), 2), 0)  # [embedding_size]
+        joint_pos = tf.where(condition=even_mask, x=sine, y=cosine)  # [embedding_size, seq_len]
+        joint_pos = tf.transpose(joint_pos)  # [seq_len, embedding_size]
 
         # 对位置向量进行缩放, 标量
-        gamma = tf.get_variable(name="gamma",
+        gamma = tf.get_variable(name="gamma_" + mode,
                                 shape=[],
                                 initializer=tf.initializers.ones,
                                 trainable=True,
                                 dtype=tf.float32)
 
-        embedding = tf.add(inputs, gamma * position_embedded, name="composed_embedding")
+        # 添加位置向量 [batch_size, seq_len, embedding_size]
+        embedding = tf.add(inputs, gamma * joint_pos, name="composed_embedding")
 
         return embedding
 
@@ -383,7 +404,7 @@ class Conv2Conv(object):
 
         # Decay learning rate
         learning_rate = tf.train.cosine_decay_restarts(learning_rate=0.01,
-                                                       global_step=tf.train.get_global_step(),
+                                                       global_step=tf.train.get_or_create_global_step(),
                                                        first_decay_steps=100,
                                                        t_mul=2.0,
                                                        m_mul=0.9,
@@ -393,18 +414,17 @@ class Conv2Conv(object):
         optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate,
                                                momentum=0.9,
                                                use_nesterov=True)
-        self.train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step(), name="train_op")
+        self.train_op = optimizer.minimize(self.loss, global_step=tf.train.get_global_step(), name="train_op")
 
     def build_network(self):
         with tf.name_scope("embedding"):
             w = tf.get_variable('w', [self.vocab_size, self.embedding_size])
             encoder_embedded = tf.nn.embedding_lookup(w, self.encoder_inputs, name="encoder_embedded")
-
             decoder_embedded = tf.nn.embedding_lookup(w, self.decoder_targets, name="decoder_embedded")
 
             # 添加位置向量
-            encoder_embedded = self.add_position_embedding(encoder_embedded)
-            decoder_embedded = self.add_position_embedding(decoder_embedded)
+            encoder_embedded = self.add_position_embedding(encoder_embedded, mode="encoder")
+            decoder_embedded = self.add_position_embedding(decoder_embedded, mode="decoder")
 
         with tf.name_scope("encoder"):
             encoder_output = self.encoder(encoder_embedded, self.encoder_inputs_length, self.is_training)
@@ -415,20 +435,33 @@ class Conv2Conv(object):
 
         self.train_method(decoder_output)
 
-    def train(self, sess):
-        feed_dict = {}
+    def train(self, sess, batch, keep_prob):
+        feed_dict = {self.encoder_inputs: batch["sources"],
+                     self.encoder_inputs_length: batch["source_length"],
+                     self.decoder_targets: batch["targets"],
+                     self.decoder_targets_length: batch["target_length"],
+                     self.batch_size: len(batch["sources"]),
+                     self.keep_prob: keep_prob}
         _, loss, predictions = sess.run([self.train_op, self.loss, self.predictions], feed_dict=feed_dict)
 
         return loss, predictions
 
-    def eval(self, sess):
-        feed_dict = {}
+    def eval(self, sess, batch, keep_prob):
+        feed_dict = {self.encoder_inputs: batch["sources"],
+                     self.encoder_inputs_length: batch["source_length"],
+                     self.decoder_targets: batch["targets"],
+                     self.decoder_targets_length: batch["target_length"],
+                     self.batch_size: len(batch["sources"]),
+                     self.keep_prob: keep_prob}
         loss, predictions = sess.run([self.loss, self.predictions], feed_dict=feed_dict)
 
         return loss, predictions
 
-    def infer(self, sess):
-        feed_dict = {}
+    def infer(self, sess, batch, keep_prob):
+        feed_dict = {self.encoder_inputs: batch["sources"],
+                     self.encoder_inputs_length: batch["source_length"],
+                     self.batch_size: len(batch["sources"]),
+                     self.keep_prob: keep_prob}
         predictions = sess.run(self.predictions, feed_dict=feed_dict)
 
         return predictions
