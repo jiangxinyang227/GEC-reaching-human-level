@@ -4,6 +4,7 @@ import tensorflow as tf
 
 from conv2conv import Conv2Conv
 from data_helper import DataSet
+from metrics import f_beta
 
 
 flags = tf.flags
@@ -55,7 +56,7 @@ with tf.device("/device:GPU:0"):
             print("----- Epoch {}/{} -----".format(epoch + 1, FLAGS.epochs))
 
             for batch in dataSet.next_batch(dataSet.train_data):
-                loss, summary = model.train(sess, batch, FLAGS.keep_prob)
+                loss, predictions = model.train(sess, batch, FLAGS.keep_prob)
                 perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
                 current_step += 1
                 print("train: step: {}, loss: {}, perplexity: {}".format(current_step, loss, perplexity))
