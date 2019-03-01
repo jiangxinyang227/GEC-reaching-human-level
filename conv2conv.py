@@ -329,24 +329,24 @@ class Conv2Conv(object):
                                                   encoder_length=encoder_length,
                                                   is_training=is_training)
 
-        with tf.variable_scope("decoder_final_linear_map"):
-            w_final = tf.get_variable("w_final", shape=[self.hidden_size, self.embedding_size],
-                                      initializer=tf.contrib.layers.xavier_initializer())
-            b_final = tf.Variable(tf.constant(0.1, shape=[self.embedding_size]), name="b_final")
-
-            # [batch_size, seq_len, embedding_size]
-            inputs_final = tf.reshape(tf.nn.xw_plus_b(tf.reshape(inputs_start,
-                                                                 [-1, self.hidden_size]),
-                                                      w_final, b_final),
-                                      [self.batch_size, -1, self.embedding_size])
+        # with tf.variable_scope("decoder_final_linear_map"):
+        #     w_final = tf.get_variable("w_final", shape=[self.hidden_size, self.embedding_size],
+        #                               initializer=tf.contrib.layers.xavier_initializer())
+        #     b_final = tf.Variable(tf.constant(0.1, shape=[self.embedding_size]), name="b_final")
+        #
+        #     # [batch_size, seq_len, embedding_size]
+        #     inputs_final = tf.reshape(tf.nn.xw_plus_b(tf.reshape(inputs_start,
+        #                                                          [-1, self.hidden_size]),
+        #                                               w_final, b_final),
+        #                               [self.batch_size, -1, self.embedding_size])
 
         with tf.name_scope("output"):
-            w_output = tf.get_variable("w_output", shape=[self.embedding_size, self.vocab_size],
+            w_output = tf.get_variable("w_output", shape=[self.hidden_size, self.vocab_size],
                                        initializer=tf.contrib.layers.xavier_initializer())
             b_output = tf.Variable(tf.constant(0.1, shape=[self.vocab_size]), name="b_output")
 
-            output = tf.reshape(tf.nn.xw_plus_b(tf.reshape(inputs_final,
-                                                           [-1, self.embedding_size]),
+            output = tf.reshape(tf.nn.xw_plus_b(tf.reshape(inputs_start,
+                                                           [-1, self.hidden_size]),
                                                 w_output, b_output),
                                 [self.batch_size, -1, self.vocab_size])
 
@@ -361,6 +361,7 @@ class Conv2Conv(object):
 
         seq_len = tf.shape(inputs)[1]
         d_model = self.embedding_size
+        print(d_model)
 
         # [embedding_size, seq_len]
         pos = tf.cast(tf.tile(tf.expand_dims(tf.range(seq_len), axis=0), multiples=[d_model, 1]), tf.float32)
@@ -402,19 +403,25 @@ class Conv2Conv(object):
         losses = tf.boolean_mask(loss, self.decoder_mask)
         self.loss = tf.reduce_mean(losses, name="loss")
 
-        # Decay learning rate
-        learning_rate = tf.train.cosine_decay_restarts(learning_rate=0.01,
-                                                       global_step=tf.train.get_or_create_global_step(),
-                                                       first_decay_steps=100,
-                                                       t_mul=2.0,
-                                                       m_mul=0.9,
-                                                       alpha=0.01)
-
-        # Optimizer
-        optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate,
-                                               momentum=0.9,
-                                               use_nesterov=True)
-        self.train_op = optimizer.minimize(self.loss, global_step=tf.train.get_global_step(), name="train_op")
+        # # Decay learning rate
+        # learning_rate = tf.train.cosine_decay_restarts(learning_rate=0.01,
+        #                                                global_step=tf.train.get_or_create_global_step(),
+        #                                                first_decay_steps=100,
+        #                                                t_mul=2.0,
+        #                                                m_mul=0.9,
+        #                                                alpha=0.01)
+        #
+        # # Optimizer
+        # optimizer = tf.train.MomentumOptimizer(learning_rate=learning_rate,
+        #                                        momentum=0.9,
+        #                                        use_nesterov=True)
+        optimizer = tf.train.MomentumOptimizer(learning_rate=0.25, momentum=0.99, use_nesterov=True)
+        trainable_params = tf.trainable_variables()
+        gradients = tf.gradients(self.loss, trainable_params)
+        # 对梯度进行梯度截断
+        clip_gradients, _ = tf.clip_by_global_norm(gradients, 1)
+        self.train_op = optimizer.apply_gradients(zip(clip_gradients, trainable_params), name="train_op")
+        # self.train_op = optimizer.minimize(self.loss, global_step=tf.train.get_global_step(), name="train_op")
 
     def build_network(self):
         with tf.name_scope("embedding"):
@@ -446,7 +453,7 @@ class Conv2Conv(object):
 
         return loss, predictions
 
-    def eval(self, sess, batch, keep_prob):
+    def valid(self, sess, batch, keep_prob):
         feed_dict = {self.encoder_inputs: batch["sources"],
                      self.encoder_inputs_length: batch["source_length"],
                      self.decoder_targets: batch["targets"],
