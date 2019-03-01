@@ -8,16 +8,19 @@ import gensim
 
 
 class DataSet(object):
-    def __init__(self, embedding_size, source_file, target_file, batch_size, ratio=None, is_first=False):
+    def __init__(self, embedding_size, source_file, target_file, source_valid,
+                 target_valid, batch_size, is_first=False):
         self.embedding_size = embedding_size
         self.source_file = source_file
         self.target_file = target_file
+        self.source_valid = source_valid
+        self.target_valid = target_valid
         self.batch_size = batch_size
-        self.ratio = ratio
+
         self.is_first = is_first
 
         self.train_data = []
-        self.eval_data = []
+        self.valid_data = []
         self.word_to_idx = {}
         self.idx_to_word = {}
         self.word_embedding = None
@@ -35,7 +38,7 @@ class DataSet(object):
         :return:
         """
         logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
-        model = gensim.models.Word2Vec(sentences, size=self.embedding_size, sg=0, min_count=3, iter=20)
+        model = gensim.models.Word2Vec(sentences, size=self.embedding_size, sg=0, min_count=0, iter=20)
         model.wv.save_word2vec_format("word2vec/word2Vec" + ".bin", binary=True)
 
     def _trans_index(self, sentences, word_to_idx):
@@ -109,7 +112,7 @@ class DataSet(object):
 
         return vocab, np.array(word_embedding)
 
-    def gen_train_eval(self):
+    def gen_train_valid(self):
         """
         生成训练，验证数据集
         :return:
@@ -118,10 +121,13 @@ class DataSet(object):
         source_data = self._read_data(self.source_file)
         target_date = self._read_data(self.target_file)
 
+        source_valid = self._read_data(self.source_valid)
+        target_valid = self._read_data(self.target_valid)
+
         # 训练词向量，并得到vocab_dict
         if self.is_first:
-            self._get_embedding(target_date)
-            self._gen_vocabulary(target_date)
+            self._get_embedding(target_date + source_data)
+            self._gen_vocabulary(target_date + source_data)
 
         else:
             with open("data/vocab/vocab_dict_500dim.pkl", "rb") as f:
@@ -134,15 +140,15 @@ class DataSet(object):
         source_data_idx = self._trans_index(source_data, self.word_to_idx)
         target_date_idx = self._trans_index(target_date, self.word_to_idx)
 
-        source_target_pairs = [[source_data_idx[i], target_date_idx[i]] for i in range(len(source_data_idx))]
+        train_data = [[source_data_idx[i], target_date_idx[i]] for i in range(len(source_data_idx))]
 
-        index = int(self.ratio * len(source_target_pairs))
+        source_valid_idx = self._trans_index(source_valid, self.word_to_idx)
+        target_valid_idx = self._trans_index(target_valid, self.word_to_idx)
 
-        eval_data = source_target_pairs[:index]
-        train_data = source_target_pairs[index:]
+        valid_data = [[source_valid_idx[i], target_valid_idx[i]] for i in range(len(source_valid_idx))]
 
         self.train_data = train_data
-        self.eval_data = eval_data
+        self.valid_data = valid_data
 
     def _process_data(self, batch: list, is_train=True) -> dict:
         """
