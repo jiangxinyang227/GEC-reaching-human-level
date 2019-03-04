@@ -421,7 +421,7 @@ def file_based_input_fn_builder(input_file, seq_length, is_training, drop_remain
 
 
 def create_model(bert_config, is_training, source_ids, source_mask, source_segment_ids, source_seq_len, vocab_size,
-                 target_ids, target_mask, target_segment_ids ,target_seq_len, use_one_hot_embeddings):
+                 target_ids, target_mask, target_segment_ids ,target_seq_len, batch_size, use_one_hot_embeddings):
     """
     创建模型
     :param bert_config:  bert 模型的配置参数
@@ -461,8 +461,6 @@ def create_model(bert_config, is_training, source_ids, source_mask, source_segme
 
     stop_grad_source_embedding = tf.stop_gradient(source_embedding)
     stop_grad_target_embedding = tf.stop_gradient(target_embedding)
-
-    batch_size = source_embedding.shape[0].value
 
     tf.logging.info("bert embedding size: {}".format(source_embedding.get_shape()))
 
@@ -521,9 +519,9 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate, vocab_size, nu
         is_training = (mode == tf.estimator.ModeKeys.TRAIN)
 
         # 使用参数构建模型,input_idx 就是输入的样本idx表示，label_ids 就是标签的idx表示
-        (loss, logits, pred_y) = create_model(
+        (loss, logits, pred_y, loss_) = create_model(
             bert_config, is_training, source_ids, source_mask, source_segment_ids, source_seq_len, vocab_size,
-            target_ids, target_mask, target_segment_ids, target_seq_len, use_one_hot_embeddings)
+            target_ids, target_mask, target_segment_ids, target_seq_len, params["batch_size"], use_one_hot_embeddings)
 
         tvars = tf.trainable_variables()
         initialized_variable_names = {}
@@ -569,13 +567,14 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate, vocab_size, nu
 
         elif mode == tf.estimator.ModeKeys.EVAL:
             # 针对NER ,进行了修改
-            def metric_fn(logits, trans_params):
+            def metric_fn(logits):
                 # 获得验证集上的性能指标
 
                 return {
                     "eval_pred": (pred_y, pred_y),
                     "eval_target": (target_ids, target_ids),
-                    "eval_seq_len": (target_seq_len, target_seq_len)
+                    "eval_seq_len": (target_seq_len, target_seq_len),
+                    "eval_loss": (loss_, loss_)
                 }
 
             # 这里eval_metrics必须是一个元祖
@@ -713,7 +712,10 @@ def main(_):
             drop_remainder=True)
 
         # estimator对象有train，evaluate，predict三个方法，调用train训练模型
-        estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
+        tensors_to_log = {"train loss": "loss:0"}
+        logging_hook = tf.train.LoggingTensorHook(
+            tensors=tensors_to_log, every_n_iter=100)
+        estimator.train(input_fn=train_input_fn, hooks=[logging_hook], max_steps=num_train_steps)
 
     if FLAGS.do_eval:
         # 获得eval data 的InputExample 对象列表
@@ -729,9 +731,9 @@ def main(_):
         tf.logging.info("  Num examples = %d", len(eval_examples))
         tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
 
-        eval_steps = None
-        if FLAGS.use_tpu:
-            eval_steps = int(len(eval_examples) / FLAGS.eval_batch_size)
+        # eval_steps = None
+        # if FLAGS.use_tpu:
+        eval_steps = int(len(eval_examples) / FLAGS.eval_batch_size)
         eval_drop_remainder = True if FLAGS.use_tpu else False
 
         # 创建eval data 数据的input_fn引用
@@ -742,7 +744,10 @@ def main(_):
             drop_remainder=eval_drop_remainder)
 
         # 调用evaluate方法进行验证
-        result = estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps)
+        tensors_to_log = {"eval loss": "loss:0"}
+        logging_hook = tf.train.LoggingTensorHook(
+            tensors=tensors_to_log, every_n_iter=100)
+        result = estimator.evaluate(input_fn=eval_input_fn, hooks=[logging_hook], steps=eval_steps - 1)
         f_beta = metrics.f_beta(result["eval_pred"], result["eval_target"], result["eval_seq_len"])
         tf.logging.info("eval_f0.5: {}".format(f_beta))
 
@@ -758,11 +763,6 @@ def main(_):
         token_path = os.path.join(FLAGS.output_dir, "token_test.txt")
         if os.path.exists(token_path):
             os.remove(token_path)
-
-        # 读取出label-index映射表
-        with codecs.open(os.path.join(FLAGS.output_dir, 'label2id.pkl'), 'rb') as rf:
-            label2id = pickle.load(rf)
-            id2label = {value: key for key, value in label2id.items()}
 
         # 将test data 转换成InputExample对象列表
         predict_examples = processor.get_test_examples(FLAGS.data_dir)

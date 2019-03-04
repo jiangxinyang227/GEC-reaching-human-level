@@ -6,8 +6,8 @@ class Conv2Conv(object):
     """
     定义卷积到卷积的seq2seq网络结构
     """
-    def __init__(self, source_embedding, target_ids, target_embedding, source_seq_len, target_seq_len, hidden_size, batch_size, vocab_size,
-                 num_layers, kernel_size, num_filters, keep_prob, is_training):
+    def __init__(self, source_embedding, target_ids, target_embedding, source_seq_len, target_seq_len, hidden_size,
+                 batch_size, vocab_size, num_layers, kernel_size, num_filters, keep_prob, is_training):
 
         """
         构建卷积到卷积的seq2seq网络
@@ -31,9 +31,13 @@ class Conv2Conv(object):
         self.source_seq_len = source_seq_len
         self.target_seq_len = target_seq_len
         self.source_embedding_size = self.source_embedding.shape[-1].value
+        self.source_max_len = self.source_embedding.shape[1].value
+
         self.target_embedding_size = self.target_embedding.shape[-1].value
 
         self.target_max_len = self.target_embedding.shape[1].value
+        print(self.target_seq_len)
+        print(self.target_max_len)
         self.target_mask = tf.sequence_mask(self.target_seq_len, self.target_max_len,
                                             dtype=tf.float32, name='target_masks')
 
@@ -44,10 +48,12 @@ class Conv2Conv(object):
         self.kernel_size = kernel_size
         self.num_filters = num_filters
 
-        self.keep_prob = keep_prob
         self.is_training = is_training
 
-        # 实例化对象时构建网络结构
+        if self.is_training:
+            self.keep_prob = keep_prob
+        else:
+            self.keep_prob = 1.0
 
     def padding_and_softmax(self, logits, query_len, key_len):
         """
@@ -303,8 +309,7 @@ class Conv2Conv(object):
         x_mask = tf.multiply(mask, x_final)
 
         # drouput 正则化
-        x_drop = tf.nn.dropout(x_mask, keep_prob=self.keep_prob,
-                               noise_shape=[self.batch_size, 1, self.hidden_size])
+        x_drop = tf.nn.dropout(x_mask, keep_prob=self.keep_prob, noise_shape=[self.batch_size, 1, self.hidden_size])
 
         # 残差连接
         x_drop = x_drop + new_inputs
@@ -414,11 +419,14 @@ class Conv2Conv(object):
         predictions = tf.argmax(decoder_output, axis=-1, name="predictions")
 
         # [batch_size, de_seq_len]
-        loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=decoder_output, labels=self.target_ids)
+        labels = tf.one_hot(self.target_ids, self.vocab_size, name="labels")
+        loss = tf.nn.softmax_cross_entropy_with_logits_v2(logits=decoder_output, labels=labels)
+
         losses = tf.boolean_mask(loss, self.target_mask)
         new_loss = tf.reduce_mean(losses, name="loss")
+        print(new_loss)
 
-        return new_loss, predictions
+        return new_loss, predictions, loss
 
     def build_network(self):
         with tf.name_scope("embedding"):
@@ -434,8 +442,8 @@ class Conv2Conv(object):
             decoder_output = self.decoder(decoder_embedded, self.target_seq_len, encoder_embedded,
                                           encoder_output, self.source_seq_len, self.is_training)
 
-        loss, predictions = self.train_method(decoder_output)
+        new_loss, predictions, loss = self.train_method(decoder_output)
 
-        return (loss, decoder_output, predictions)
+        return (new_loss, decoder_output, predictions, loss)
 
 
