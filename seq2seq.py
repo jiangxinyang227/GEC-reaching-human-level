@@ -36,8 +36,7 @@ class Conv2Conv(object):
         self.target_embedding_size = self.target_embedding.shape[-1].value
 
         self.target_max_len = self.target_embedding.shape[1].value
-        print(self.target_seq_len)
-        print(self.target_max_len)
+
         self.target_mask = tf.sequence_mask(self.target_seq_len, self.target_max_len,
                                             dtype=tf.float32, name='target_masks')
 
@@ -380,23 +379,48 @@ class Conv2Conv(object):
         :return: [batch_size, seq_len, embedding_size]
         """
 
-        seq_len = tf.shape(inputs)[1]
-        d_model = tf.cast(tf.shape(inputs)[-1], tf.float32)
+        # seq_len = tf.shape(inputs)[1]
+        #         # d_model = tf.cast(tf.shape(inputs)[-1], tf.float32)
+        #         #
+        #         # # [embedding_size, seq_len]
+        #         # a = tf.expand_dims(tf.range(seq_len), axis=0)
+        #         # print(a)
+        #         # b = tf.tile(a, multiples=[d_model, 1])
+        #         # pos = tf.cast(b, tf.float32)
+        #         # # [embedding_size, seq_len]
+        #         # i = tf.cast(tf.tile(tf.expand_dims(tf.range(d_model), axis=1), multiples=[1, seq_len]), tf.float32)
+        #         #
+        #         # # 定义正弦和余弦函数
+        #         # sine = tf.sin(tf.divide(pos, tf.pow(float(10 ** 4), tf.divide(i, d_model))))  # [E, T]
+        #         # cosine = tf.cos(tf.divide(pos, tf.pow(float(10 ** 4), tf.divide(i, d_model))))  # [E, T]
+        #         # cosine = tf.manip.roll(cosine, shift=1, axis=0)
+        #         #
+        #         # # 生成正弦和余弦的分段函数
+        #         # even_mask = tf.equal(tf.mod(tf.range(d_model), 2), 0)  # [embedding_size]
+        #         # joint_pos = tf.where(condition=even_mask, x=sine, y=cosine)  # [embedding_size, seq_len]
+        #         # joint_pos = tf.transpose(joint_pos)  # [seq_len, embedding_size]
 
-        # [embedding_size, seq_len]
-        pos = tf.cast(tf.tile(tf.expand_dims(tf.range(seq_len), axis=0), multiples=[d_model, 1]), tf.float32)
-        # [embedding_size, seq_len]
-        i = tf.cast(tf.tile(tf.expand_dims(tf.range(d_model), axis=1), multiples=[1, seq_len]), tf.float32)
+        batch_size = self.batch_size
+        seq_len = self.source_max_len
+        embedding_size = self.source_embedding_size
 
-        # 定义正弦和余弦函数
-        sine = tf.sin(tf.divide(pos, tf.pow(float(10 ** 4), tf.divide(i, d_model))))  # [E, T]
-        cosine = tf.cos(tf.divide(pos, tf.pow(float(10 ** 4), tf.divide(i, d_model))))  # [E, T]
-        cosine = tf.manip.roll(cosine, shift=1, axis=0)
+        # 生成位置的索引，并扩张到batch中所有的样本上
+        position_index = tf.tile(tf.expand_dims(tf.range(seq_len), 0), [batch_size, 1])
 
-        # 生成正弦和余弦的分段函数
-        even_mask = tf.equal(tf.mod(tf.range(d_model), 2), 0)  # [embedding_size]
-        joint_pos = tf.where(condition=even_mask, x=sine, y=cosine)  # [embedding_size, seq_len]
-        joint_pos = tf.transpose(joint_pos)  # [seq_len, embedding_size]
+        # 根据正弦和余弦函数来获得每个位置上的embedding的第一部分
+        position_embedding = np.array([[pos / np.power(10000, (i - i % 2) / embedding_size)
+                                        for i in range(embedding_size)]
+                                      for pos in range(seq_len)])
+
+        # 然后根据奇偶性分别用sin和cos函数来包装
+        position_embedding[:, 0::2] = np.sin(position_embedding[:, 0::2])
+        position_embedding[:, 1::2] = np.cos(position_embedding[:, 1::2])
+
+        # 将positionEmbedding转换成tensor的格式
+        position_embedding_ = tf.cast(position_embedding, dtype=tf.float32)
+
+        # 得到三维的矩阵[batchSize, sequenceLen, embeddingSize]
+        position_embedded = tf.nn.embedding_lookup(position_embedding_, position_index)
 
         # 对位置向量进行缩放, 标量
         gamma = tf.get_variable(name="gamma_" + mode,
@@ -406,7 +430,7 @@ class Conv2Conv(object):
                                 dtype=tf.float32)
 
         # 添加位置向量 [batch_size, seq_len, embedding_size]
-        embedding = tf.add(inputs, gamma * joint_pos, name="composed_embedding")
+        embedding = tf.add(inputs, gamma * position_embedded, name="composed_embedding")
 
         return embedding
 
@@ -424,7 +448,6 @@ class Conv2Conv(object):
 
         losses = tf.boolean_mask(loss, self.target_mask)
         new_loss = tf.reduce_mean(losses, name="loss")
-        print(new_loss)
 
         return new_loss, predictions, loss
 
@@ -444,6 +467,6 @@ class Conv2Conv(object):
 
         new_loss, predictions, loss = self.train_method(decoder_output)
 
-        return (new_loss, decoder_output, predictions, loss)
+        return (new_loss, decoder_output, predictions)
 
 
